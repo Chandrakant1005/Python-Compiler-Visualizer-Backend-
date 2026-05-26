@@ -1,397 +1,630 @@
 import ast
+import copy
 import operator
-from typing import List, Dict, Any, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+TECHNIQUES = [
+    "Constant Folding",
+    "Constant Propagation",
+    "Copy Propagation",
+    "Common Subexpression Elimination (CSE)",
+    "Dead Code Elimination",
+    "Dead Store Elimination",
+    "Strength Reduction",
+    "Algebraic Simplification",
+    "Loop Invariant Code Motion",
+    "Loop Unrolling",
+    "Loop Fusion",
+    "Loop Fission (Loop Distribution)",
+    "Induction Variable Elimination",
+    "Code Motion",
+]
+
+
+@dataclass
+class OptimizationEvent:
+    technique: str
+    description: str
+    line: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "technique": self.technique,
+            "description": self.description,
+            "line": self.line,
+        }
+
 
 class Optimizer:
-    def __init__(self):
-        self.optimizations_applied = []
-    
+    def __init__(self) -> None:
+        self.events: List[OptimizationEvent] = []
+
     def optimize(self, code: str) -> Dict[str, Any]:
-        """Apply optimizations to Python code"""
         try:
             original_tree = ast.parse(code)
-            optimized_tree = self._apply_optimizations(original_tree)
-            
-            optimized_code = ast.unparse(optimized_tree) if hasattr(ast, 'unparse') else code
-            
+            optimized_tree = copy.deepcopy(original_tree)
+            self.events = []
+
+            optimized_tree = ConstantFolder(self.events).visit(optimized_tree)
+            optimized_tree = AlgebraicSimplifier(self.events).visit(optimized_tree)
+            optimized_tree = StrengthReducer(self.events).visit(optimized_tree)
+            optimized_tree = BlockOptimizer(self.events).visit(optimized_tree)
+            optimized_tree = DeadCodeEliminator(self.events).visit(optimized_tree)
+            optimized_tree = LoopOptimizer(self.events).visit(optimized_tree)
+            ast.fix_missing_locations(optimized_tree)
+
+            optimized_code = ast.unparse(optimized_tree) if hasattr(ast, "unparse") else code
+            original_code = ast.unparse(original_tree) if hasattr(ast, "unparse") else code
+
+            used = {event.technique for event in self.events}
+            technique_status = [
+                {
+                    "name": technique,
+                    "used": technique in used,
+                }
+                for technique in TECHNIQUES
+            ]
+
             return {
-                'optimized_code': optimized_code,
-                'optimizations_applied': self.optimizations_applied,
-                'original_tree': self._ast_to_dict(original_tree),
-                'optimized_tree': self._ast_to_dict(optimized_tree)
+                "original_code": original_code,
+                "optimized_code": optimized_code,
+                "optimizations_applied": [event.to_dict() for event in self.events],
+                "technique_status": technique_status,
+                "summary": {
+                    "applied_count": len(self.events),
+                    "used_techniques": len(used),
+                    "original_lines": len(original_code.splitlines()),
+                    "optimized_lines": len(optimized_code.splitlines()),
+                },
             }
-        except SyntaxError as e:
+        except SyntaxError as exc:
             return {
-                'error': f'Syntax error: {str(e)}',
-                'line': e.lineno
+                "error": f"Syntax error: {str(exc)}",
+                "error_type": "OptimizationError",
+                "line": exc.lineno,
+                "column": exc.offset,
             }
-    
-    def _apply_optimizations(self, tree: ast.AST) -> ast.AST:
-        """Apply all optimizations to the AST"""
-        self.optimizations_applied = []
-        
-        # Apply constant folding
-        tree = self._constant_folding(tree)
-        
-        # Apply dead code elimination
-        tree = self._dead_code_elimination(tree)
-        
-        # Apply algebraic simplifications
-        tree = self._algebraic_simplifications(tree)
-        
-        return tree
-    
-    def _constant_folding(self, node: ast.AST) -> ast.AST:
-        """Apply constant folding optimization"""
-        if isinstance(node, ast.BinOp):
-            # Optimize left and right operands first
-            left = self._constant_folding(node.left)
-            right = self._constant_folding(node.right)
-            
-            # If both operands are constants, compute the result
-            if isinstance(left, ast.Constant) and isinstance(right, ast.Constant):
-                try:
-                    result = self._evaluate_binary_op(left.value, right.value, node.op)
-                    if result is not None:
-                        self.optimizations_applied.append({
-                            'type': 'constant_folding',
-                            'description': f'Folded {left.value} {self._get_op_symbol(node.op)} {right.value} to {result}',
-                            'line': getattr(node, 'lineno', None)
-                        })
-                        return ast.Constant(value=result)
-                except:
-                    pass
-            
-            # Return node with optimized operands
-            node.left = left
-            node.right = right
-            return node
-        
-        elif isinstance(node, ast.UnaryOp):
-            operand = self._constant_folding(node.operand)
-            
-            if isinstance(operand, ast.Constant):
-                try:
-                    result = self._evaluate_unary_op(operand.value, node.op)
-                    if result is not None:
-                        self.optimizations_applied.append({
-                            'type': 'constant_folding',
-                            'description': f'Folded {self._get_unary_op_symbol(node.op)}{operand.value} to {result}',
-                            'line': getattr(node, 'lineno', None)
-                        })
-                        return ast.Constant(value=result)
-                except:
-                    pass
-            
-            node.operand = operand
-            return node
-        
-        elif isinstance(node, ast.Compare):
-            # Handle comparisons with constants
-            left = self._constant_folding(node.left)
-            new_comparators = []
-            new_ops = []
-            
-            for op, comparator in zip(node.ops, node.comparators):
-                right = self._constant_folding(comparator)
-                
-                if isinstance(left, ast.Constant) and isinstance(right, ast.Constant):
-                    try:
-                        result = self._evaluate_compare_op(left.value, right.value, op)
-                        if result is not None:
-                            self.optimizations_applied.append({
-                                'type': 'constant_folding',
-                                'description': f'Folded {left.value} {self._get_compare_symbol(op)} {right.value} to {result}',
-                                'line': getattr(node, 'lineno', None)
-                            })
-                            left = ast.Constant(value=result)
-                        else:
-                            new_comparators.append(right)
-                            new_ops.append(op)
-                    except:
-                        new_comparators.append(right)
-                        new_ops.append(op)
+
+
+class ConstantFolder(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
+            result = eval_binary(node.left.value, node.right.value, node.op)
+            if result is not None:
+                self.events.append(
+                    OptimizationEvent(
+                        "Constant Folding",
+                        f"Folded {render_const(node.left.value)} {op_symbol(node.op)} {render_const(node.right.value)} to {render_const(result)}",
+                        getattr(node, "lineno", None),
+                    )
+                )
+                return ast.copy_location(ast.Constant(value=result), node)
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.operand, ast.Constant):
+            result = eval_unary(node.operand.value, node.op)
+            if result is not None:
+                self.events.append(
+                    OptimizationEvent(
+                        "Constant Folding",
+                        f"Folded {unary_symbol(node.op)}{render_const(node.operand.value)} to {render_const(result)}",
+                        getattr(node, "lineno", None),
+                    )
+                )
+                return ast.copy_location(ast.Constant(value=result), node)
+        return node
+
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        self.generic_visit(node)
+        if len(node.ops) == 1 and len(node.comparators) == 1:
+            if isinstance(node.left, ast.Constant) and isinstance(node.comparators[0], ast.Constant):
+                result = eval_compare(node.left.value, node.comparators[0].value, node.ops[0])
+                if result is not None:
+                    self.events.append(
+                        OptimizationEvent(
+                            "Constant Folding",
+                            f"Folded {render_const(node.left.value)} {compare_symbol(node.ops[0])} {render_const(node.comparators[0].value)} to {render_const(result)}",
+                            getattr(node, "lineno", None),
+                        )
+                    )
+                    return ast.copy_location(ast.Constant(value=result), node)
+        return node
+
+
+class AlgebraicSimplifier(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+
+        if isinstance(node.op, ast.Add):
+            if is_const_value(node.right, 0):
+                self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified x + 0 to x", getattr(node, "lineno", None)))
+                return node.left
+            if is_const_value(node.left, 0):
+                self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified 0 + x to x", getattr(node, "lineno", None)))
+                return node.right
+
+        if isinstance(node.op, ast.Sub) and is_const_value(node.right, 0):
+            self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified x - 0 to x", getattr(node, "lineno", None)))
+            return node.left
+
+        if isinstance(node.op, ast.Mult):
+            if is_const_value(node.right, 1):
+                self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified x * 1 to x", getattr(node, "lineno", None)))
+                return node.left
+            if is_const_value(node.left, 1):
+                self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified 1 * x to x", getattr(node, "lineno", None)))
+                return node.right
+            if is_const_value(node.right, 0) or is_const_value(node.left, 0):
+                self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified multiplication by 0", getattr(node, "lineno", None)))
+                return ast.copy_location(ast.Constant(value=0), node)
+
+        if isinstance(node.op, ast.Div) and is_const_value(node.right, 1):
+            self.events.append(OptimizationEvent("Algebraic Simplification", "Simplified x / 1 to x", getattr(node, "lineno", None)))
+            return node.left
+
+        return node
+
+
+class StrengthReducer(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Mult):
+            if is_const_value(node.right, 2):
+                self.events.append(OptimizationEvent("Strength Reduction", "Replaced x * 2 with x + x", getattr(node, "lineno", None)))
+                return ast.copy_location(ast.BinOp(left=node.left, op=ast.Add(), right=copy.deepcopy(node.left)), node)
+            if is_const_value(node.left, 2):
+                self.events.append(OptimizationEvent("Strength Reduction", "Replaced 2 * x with x + x", getattr(node, "lineno", None)))
+                return ast.copy_location(ast.BinOp(left=node.right, op=ast.Add(), right=copy.deepcopy(node.right)), node)
+        return node
+
+
+class BlockOptimizer(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        node.body = self._optimize_block(node.body, allow_dead_store=True)
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node.body = self._optimize_block(node.body, allow_dead_store=True)
+        return node
+
+    def visit_If(self, node: ast.If) -> ast.AST:
+        node.test = self.visit(node.test)
+        node.body = self._optimize_block(node.body, allow_dead_store=False)
+        node.orelse = self._optimize_block(node.orelse, allow_dead_store=False)
+        return node
+
+    def visit_While(self, node: ast.While) -> ast.AST:
+        node.test = self.visit(node.test)
+        node.body = self._optimize_block(node.body, allow_dead_store=False)
+        node.orelse = self._optimize_block(node.orelse, allow_dead_store=False)
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.AST:
+        node.iter = self.visit(node.iter)
+        node.body = self._optimize_block(node.body, allow_dead_store=False)
+        node.orelse = self._optimize_block(node.orelse, allow_dead_store=False)
+        return node
+
+    def _optimize_block(self, statements: List[ast.stmt], allow_dead_store: bool) -> List[ast.stmt]:
+        statements = [self.visit(copy.deepcopy(stmt)) for stmt in statements]
+        statements = [stmt for stmt in statements if stmt is not None]
+        statements = self._propagate_constants(statements)
+        statements = self._propagate_copies(statements)
+        statements = self._eliminate_common_subexpressions(statements)
+        if allow_dead_store:
+            statements = self._eliminate_dead_stores(statements)
+        return statements
+
+    def _propagate_constants(self, statements: List[ast.stmt]) -> List[ast.stmt]:
+        env: Dict[str, ast.Constant] = {}
+        result: List[ast.stmt] = []
+        for stmt in statements:
+            replacer = NameReplacer({name: const for name, const in env.items()})
+            stmt = replacer.visit(stmt)
+            if replacer.replaced:
+                self.events.append(
+                    OptimizationEvent(
+                        "Constant Propagation",
+                        f"Propagated constant value into line {getattr(stmt, 'lineno', '?')}",
+                        getattr(stmt, "lineno", None),
+                    )
+                )
+
+            assigned = assigned_names(stmt)
+            for name in assigned:
+                env.pop(name, None)
+
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                if isinstance(stmt.value, ast.Constant):
+                    env[stmt.targets[0].id] = stmt.value
                 else:
-                    new_comparators.append(right)
-                    new_ops.append(op)
-                    left = right
-            
-            if new_ops:
-                node.left = left
-                node.ops = new_ops
-                node.comparators = new_comparators
-                return node
-            else:
-                return left
-        
-        # Handle other node types
-        for field, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                new_list = []
-                for item in value:
-                    if isinstance(item, ast.AST):
-                        new_list.append(self._constant_folding(item))
-                    else:
-                        new_list.append(item)
-                setattr(node, field, new_list)
-            elif isinstance(value, ast.AST):
-                setattr(node, field, self._constant_folding(value))
-        
-        return node
-    
-    def _dead_code_elimination(self, node: ast.AST) -> ast.AST:
-        """Apply dead code elimination"""
-        if isinstance(node, ast.If):
-            # Check if condition is a constant
-            if isinstance(node.test, ast.Constant):
-                if bool(node.test.value):
-                    # Keep only the then block
-                    self.optimizations_applied.append({
-                        'type': 'dead_code_elimination',
-                        'description': 'Removed unreachable else block (condition always true)',
-                        'line': getattr(node, 'lineno', None)
-                    })
-                    return ast.Expr(value=ast.Constant(value=None)) if not node.body else node.body[0] if len(node.body) == 1 else ast.If(test=node.test, body=node.body, orelse=[])
-                else:
-                    # Keep only the else block
-                    self.optimizations_applied.append({
-                        'type': 'dead_code_elimination',
-                        'description': 'Removed unreachable if block (condition always false)',
-                        'line': getattr(node, 'lineno', None)
-                    })
-                    return ast.Expr(value=ast.Constant(value=None)) if not node.orelse else node.orelse[0] if len(node.orelse) == 1 else ast.If(test=node.test, body=[], orelse=node.orelse)
-        
-        elif isinstance(node, ast.While):
-            # Check if condition is a constant
-            if isinstance(node.test, ast.Constant):
-                if not bool(node.test.value):
-                    # Remove the entire while loop
-                    self.optimizations_applied.append({
-                        'type': 'dead_code_elimination',
-                        'description': 'Removed unreachable while loop (condition always false)',
-                        'line': getattr(node, 'lineno', None)
-                    })
-                    return ast.Expr(value=ast.Constant(value=None))
-        
-        # Handle other node types
-        for field, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                new_list = []
-                for item in value:
-                    if isinstance(item, ast.AST):
-                        optimized = self._dead_code_elimination(item)
-                        if not (isinstance(optimized, ast.Expr) and isinstance(optimized.value, ast.Constant) and optimized.value.value is None):
-                            new_list.append(optimized)
-                    else:
-                        new_list.append(item)
-                setattr(node, field, new_list)
-            elif isinstance(value, ast.AST):
-                setattr(node, field, self._dead_code_elimination(value))
-        
-        return node
-    
-    def _algebraic_simplifications(self, node: ast.AST) -> ast.AST:
-        """Apply algebraic simplifications"""
-        if isinstance(node, ast.BinOp):
-            left = self._algebraic_simplifications(node.left)
-            right = self._algebraic_simplifications(node.right)
-            
-            # Simplify x + 0 -> x
-            if isinstance(node.op, ast.Add) and isinstance(right, ast.Constant) and right.value == 0:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified x + 0 to x',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return left
-            
-            # Simplify 0 + x -> x
-            if isinstance(node.op, ast.Add) and isinstance(left, ast.Constant) and left.value == 0:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified 0 + x to x',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return right
-            
-            # Simplify x * 1 -> x
-            if isinstance(node.op, ast.Mult) and isinstance(right, ast.Constant) and right.value == 1:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified x * 1 to x',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return left
-            
-            # Simplify 1 * x -> x
-            if isinstance(node.op, ast.Mult) and isinstance(left, ast.Constant) and left.value == 1:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified 1 * x to x',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return right
-            
-            # Simplify x * 0 -> 0
-            if isinstance(node.op, ast.Mult) and isinstance(right, ast.Constant) and right.value == 0:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified x * 0 to 0',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return ast.Constant(value=0)
-            
-            # Simplify 0 * x -> 0
-            if isinstance(node.op, ast.Mult) and isinstance(left, ast.Constant) and left.value == 0:
-                self.optimizations_applied.append({
-                    'type': 'algebraic_simplification',
-                    'description': 'Simplified 0 * x to 0',
-                    'line': getattr(node, 'lineno', None)
-                })
-                return ast.Constant(value=0)
-            
-            node.left = left
-            node.right = right
-            return node
-        
-        # Handle other node types
-        for field, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                new_list = []
-                for item in value:
-                    if isinstance(item, ast.AST):
-                        new_list.append(self._algebraic_simplifications(item))
-                    else:
-                        new_list.append(item)
-                setattr(node, field, new_list)
-            elif isinstance(value, ast.AST):
-                setattr(node, field, self._algebraic_simplifications(value))
-        
-        return node
-    
-    def _evaluate_binary_op(self, left: Any, right: Any, op: ast.operator) -> Any:
-        """Evaluate binary operation with constant operands"""
-        ops = {
-            ast.Add: operator.add,
-            ast.Sub: operator.sub,
-            ast.Mult: operator.mul,
-            ast.Div: operator.truediv,
-            ast.FloorDiv: operator.floordiv,
-            ast.Mod: operator.mod,
-            ast.Pow: operator.pow,
-            ast.LShift: operator.lshift,
-            ast.RShift: operator.rshift,
-            ast.BitOr: operator.or_,
-            ast.BitXor: operator.xor,
-            ast.BitAnd: operator.and_,
-        }
-        
-        op_func = ops.get(type(op))
-        if op_func:
-            try:
-                return op_func(left, right)
-            except:
-                return None
-        return None
-    
-    def _evaluate_unary_op(self, operand: Any, op: ast.unaryop) -> Any:
-        """Evaluate unary operation with constant operand"""
-        ops = {
-            ast.UAdd: operator.pos,
-            ast.USub: operator.neg,
-            ast.Not: operator.not_,
-            ast.Invert: operator.invert,
-        }
-        
-        op_func = ops.get(type(op))
-        if op_func:
-            try:
-                return op_func(operand)
-            except:
-                return None
-        return None
-    
-    def _evaluate_compare_op(self, left: Any, right: Any, op: ast.cmpop) -> Any:
-        """Evaluate comparison operation with constant operands"""
-        ops = {
-            ast.Eq: operator.eq,
-            ast.NotEq: operator.ne,
-            ast.Lt: operator.lt,
-            ast.LtE: operator.le,
-            ast.Gt: operator.gt,
-            ast.GtE: operator.ge,
-        }
-        
-        op_func = ops.get(type(op))
-        if op_func:
-            try:
-                return op_func(left, right)
-            except:
-                return None
-        return None
-    
-    def _get_op_symbol(self, op: ast.operator) -> str:
-        """Get string symbol for binary operator"""
-        symbols = {
-            ast.Add: '+',
-            ast.Sub: '-',
-            ast.Mult: '*',
-            ast.Div: '/',
-            ast.FloorDiv: '//',
-            ast.Mod: '%',
-            ast.Pow: '**',
-            ast.LShift: '<<',
-            ast.RShift: '>>',
-            ast.BitOr: '|',
-            ast.BitXor: '^',
-            ast.BitAnd: '&',
-        }
-        return symbols.get(type(op), '?')
-    
-    def _get_unary_op_symbol(self, op: ast.unaryop) -> str:
-        """Get string symbol for unary operator"""
-        symbols = {
-            ast.UAdd: '+',
-            ast.USub: '-',
-            ast.Not: 'not',
-            ast.Invert: '~',
-        }
-        return symbols.get(type(op), '?')
-    
-    def _get_compare_symbol(self, op: ast.cmpop) -> str:
-        """Get string symbol for comparison operator"""
-        symbols = {
-            ast.Eq: '==',
-            ast.NotEq: '!=',
-            ast.Lt: '<',
-            ast.LtE: '<=',
-            ast.Gt: '>',
-            ast.GtE: '>=',
-            ast.Is: 'is',
-            ast.IsNot: 'is not',
-            ast.In: 'in',
-            ast.NotIn: 'not in',
-        }
-        return symbols.get(type(op), '?')
-    
-    def _ast_to_dict(self, node: ast.AST) -> Dict[str, Any]:
-        """Convert AST node to dictionary representation"""
-        result = {
-            'type': node.__class__.__name__,
-            'attributes': {}
-        }
-        
-        for field, value in ast.iter_fields(node):
-            if isinstance(value, ast.AST):
-                result['attributes'][field] = self._ast_to_dict(value)
-            elif isinstance(value, list):
-                result['attributes'][field] = [self._ast_to_dict(item) if isinstance(item, ast.AST) else item for item in value]
-            else:
-                result['attributes'][field] = value
-        
-        if hasattr(node, 'lineno'):
-            result['line'] = node.lineno
-        if hasattr(node, 'col_offset'):
-            result['column'] = node.col_offset
-            
+                    env.pop(stmt.targets[0].id, None)
+
+            result.append(stmt)
         return result
+
+    def _propagate_copies(self, statements: List[ast.stmt]) -> List[ast.stmt]:
+        env: Dict[str, str] = {}
+        result: List[ast.stmt] = []
+        for stmt in statements:
+            replacer = CopyReplacer(env)
+            stmt = replacer.visit(stmt)
+            if replacer.replaced:
+                self.events.append(
+                    OptimizationEvent(
+                        "Copy Propagation",
+                        f"Propagated copied variable into line {getattr(stmt, 'lineno', '?')}",
+                        getattr(stmt, "lineno", None),
+                    )
+                )
+
+            assigned = assigned_names(stmt)
+            for name in assigned:
+                env.pop(name, None)
+                env = {k: v for k, v in env.items() if v != name}
+
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) and isinstance(stmt.value, ast.Name):
+                env[stmt.targets[0].id] = stmt.value.id
+
+            result.append(stmt)
+        return result
+
+    def _eliminate_common_subexpressions(self, statements: List[ast.stmt]) -> List[ast.stmt]:
+        available: Dict[str, Tuple[str, Set[str]]] = {}
+        result: List[ast.stmt] = []
+        for stmt in statements:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                target = stmt.targets[0].id
+                key = expression_key(stmt.value)
+                deps = expr_names(stmt.value)
+                if key and key in available and not (deps & {target}):
+                    source, source_deps = available[key]
+                    stmt.value = ast.copy_location(ast.Name(id=source, ctx=ast.Load()), stmt.value)
+                    self.events.append(
+                        OptimizationEvent(
+                            "Common Subexpression Elimination (CSE)",
+                            f"Reused previously computed expression for {target}",
+                            getattr(stmt, "lineno", None),
+                        )
+                    )
+                else:
+                    if key:
+                        available[key] = (target, deps)
+
+                modified = {target}
+                available = {
+                    expr: data for expr, data in available.items() if not (data[1] & modified or expr_depends_on_name(expr, modified))
+                }
+            else:
+                modified = assigned_names(stmt)
+                if modified:
+                    available = {
+                        expr: data for expr, data in available.items() if not (data[1] & modified or expr_depends_on_name(expr, modified))
+                    }
+
+            result.append(stmt)
+        return result
+
+    def _eliminate_dead_stores(self, statements: List[ast.stmt]) -> List[ast.stmt]:
+        live: Set[str] = set()
+        kept: List[ast.stmt] = []
+        for stmt in reversed(statements):
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                target = stmt.targets[0].id
+                if target not in live and is_pure_expression(stmt.value):
+                    self.events.append(
+                        OptimizationEvent(
+                            "Dead Store Elimination",
+                            f"Removed store to {target} because its value was never read",
+                            getattr(stmt, "lineno", None),
+                        )
+                    )
+                    continue
+                live.discard(target)
+                live |= expr_names(stmt.value)
+            else:
+                live |= used_names(stmt)
+            kept.append(stmt)
+        kept.reverse()
+        return kept
+
+
+class DeadCodeEliminator(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        node.body = self._trim_after_terminator([self.visit(stmt) for stmt in node.body])
+        node.body = [stmt for stmt in node.body if stmt is not None]
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node.body = self._trim_after_terminator([self.visit(stmt) for stmt in node.body])
+        node.body = [stmt for stmt in node.body if stmt is not None]
+        return node
+
+    def visit_If(self, node: ast.If) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.test, ast.Constant):
+            if bool(node.test.value):
+                self.events.append(OptimizationEvent("Dead Code Elimination", "Removed unreachable else branch", getattr(node, "lineno", None)))
+                return node.body
+            self.events.append(OptimizationEvent("Dead Code Elimination", "Removed unreachable if branch", getattr(node, "lineno", None)))
+            return node.orelse
+        return node
+
+    def visit_While(self, node: ast.While) -> Optional[ast.AST]:
+        self.generic_visit(node)
+        if isinstance(node.test, ast.Constant) and not bool(node.test.value):
+            self.events.append(OptimizationEvent("Dead Code Elimination", "Removed while loop with constant false condition", getattr(node, "lineno", None)))
+            return None
+        return node
+
+    def _trim_after_terminator(self, statements: List[Optional[ast.stmt]]) -> List[ast.stmt]:
+        result: List[ast.stmt] = []
+        terminated = False
+        for stmt in statements:
+            if stmt is None:
+                continue
+            if terminated:
+                self.events.append(OptimizationEvent("Dead Code Elimination", "Removed unreachable statement after control transfer", getattr(stmt, "lineno", None)))
+                continue
+            result.append(stmt)
+            if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+                terminated = True
+        return result
+
+
+class LoopOptimizer(ast.NodeTransformer):
+    def __init__(self, events: List[OptimizationEvent]) -> None:
+        self.events = events
+
+    def visit_For(self, node: ast.For) -> ast.AST:
+        self.generic_visit(node)
+        moved = self._move_invariants(node)
+        if isinstance(moved, list):
+            prefix = moved[:-1]
+            loop_node = moved[-1]
+            unrolled = self._unroll_loop(loop_node) if isinstance(loop_node, ast.For) else loop_node
+            if isinstance(unrolled, list):
+                return prefix + unrolled
+            return prefix + [unrolled]
+        return self._unroll_loop(moved)
+
+    def visit_While(self, node: ast.While) -> ast.AST:
+        self.generic_visit(node)
+        return self._move_invariants(node)
+
+    def _move_invariants(self, node: ast.AST) -> ast.AST:
+        if not isinstance(node, (ast.For, ast.While)):
+            return node
+
+        loop_assigned = set()
+        for stmt in node.body:
+            loop_assigned |= assigned_names(stmt)
+
+        movable: List[ast.stmt] = []
+        remaining: List[ast.stmt] = []
+        for stmt in node.body:
+            if (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and is_pure_expression(stmt.value)
+            ):
+                deps = expr_names(stmt.value)
+                if not (deps & loop_assigned):
+                    movable.append(stmt)
+                    self.events.append(
+                        OptimizationEvent(
+                            "Loop Invariant Code Motion",
+                            f"Moved invariant assignment to {stmt.targets[0].id} outside the loop",
+                            getattr(stmt, "lineno", None),
+                        )
+                    )
+                    self.events.append(
+                        OptimizationEvent(
+                            "Code Motion",
+                            f"Moved code for {stmt.targets[0].id} to a safer earlier position",
+                            getattr(stmt, "lineno", None),
+                        )
+                    )
+                    continue
+            remaining.append(stmt)
+
+        if movable:
+            node.body = remaining
+            return movable + [node]
+        return node
+
+    def _unroll_loop(self, node: ast.For) -> ast.AST:
+        if (
+            isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Name)
+            and node.iter.func.id == "range"
+            and len(node.iter.args) == 1
+            and isinstance(node.iter.args[0], ast.Constant)
+            and isinstance(node.iter.args[0].value, int)
+            and 0 <= node.iter.args[0].value <= 4
+            and isinstance(node.target, ast.Name)
+        ):
+            count = node.iter.args[0].value
+            unrolled: List[ast.stmt] = []
+            for value in range(count):
+                body_copy = [copy.deepcopy(stmt) for stmt in node.body]
+                replacer = NameReplacer({node.target.id: ast.Constant(value=value)})
+                body_copy = [replacer.visit(stmt) for stmt in body_copy]
+                unrolled.extend(body_copy)
+            self.events.append(
+                OptimizationEvent(
+                    "Loop Unrolling",
+                    f"Unrolled range loop with {count} iterations",
+                    getattr(node, "lineno", None),
+                )
+            )
+            return unrolled
+        return node
+
+
+class NameReplacer(ast.NodeTransformer):
+    def __init__(self, replacements: Dict[str, ast.AST]) -> None:
+        self.replacements = replacements
+        self.replaced = False
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id in self.replacements:
+            self.replaced = True
+            return ast.copy_location(copy.deepcopy(self.replacements[node.id]), node)
+        return node
+
+
+class CopyReplacer(ast.NodeTransformer):
+    def __init__(self, replacements: Dict[str, str]) -> None:
+        self.replacements = replacements
+        self.replaced = False
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id in self.replacements:
+            self.replaced = True
+            return ast.copy_location(ast.Name(id=self.replacements[node.id], ctx=ast.Load()), node)
+        return node
+
+
+def op_symbol(op: ast.operator) -> str:
+    return {
+        ast.Add: "+",
+        ast.Sub: "-",
+        ast.Mult: "*",
+        ast.Div: "/",
+        ast.Mod: "%",
+    }.get(type(op), "?")
+
+
+def unary_symbol(op: ast.unaryop) -> str:
+    return {
+        ast.USub: "-",
+        ast.UAdd: "+",
+        ast.Not: "not ",
+    }.get(type(op), "")
+
+
+def compare_symbol(op: ast.cmpop) -> str:
+    return {
+        ast.Eq: "==",
+        ast.NotEq: "!=",
+        ast.Lt: "<",
+        ast.LtE: "<=",
+        ast.Gt: ">",
+        ast.GtE: ">=",
+    }.get(type(op), "?")
+
+
+def eval_binary(left: Any, right: Any, op: ast.operator) -> Any:
+    func = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Mod: operator.mod,
+    }.get(type(op))
+    if not func:
+        return None
+    try:
+        return func(left, right)
+    except Exception:
+        return None
+
+
+def eval_unary(value: Any, op: ast.unaryop) -> Any:
+    func = {
+        ast.UAdd: operator.pos,
+        ast.USub: operator.neg,
+        ast.Not: operator.not_,
+    }.get(type(op))
+    if not func:
+        return None
+    try:
+        return func(value)
+    except Exception:
+        return None
+
+
+def eval_compare(left: Any, right: Any, op: ast.cmpop) -> Any:
+    func = {
+        ast.Eq: operator.eq,
+        ast.NotEq: operator.ne,
+        ast.Lt: operator.lt,
+        ast.LtE: operator.le,
+        ast.Gt: operator.gt,
+        ast.GtE: operator.ge,
+    }.get(type(op))
+    if not func:
+        return None
+    try:
+        return func(left, right)
+    except Exception:
+        return None
+
+
+def is_const_value(node: ast.AST, value: Any) -> bool:
+    return isinstance(node, ast.Constant) and node.value == value
+
+
+def render_const(value: Any) -> str:
+    return repr(value) if isinstance(value, str) else str(value)
+
+
+def assigned_names(node: ast.AST) -> Set[str]:
+    names: Set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+            names.add(child.id)
+    return names
+
+
+def used_names(node: ast.AST) -> Set[str]:
+    names: Set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+            names.add(child.id)
+    return names
+
+
+def expr_names(node: ast.AST) -> Set[str]:
+    return used_names(node)
+
+
+def is_pure_expression(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            return False
+    return isinstance(node, (ast.Constant, ast.Name, ast.BinOp, ast.UnaryOp, ast.Compare, ast.BoolOp, ast.Tuple, ast.List))
+
+
+def expression_key(node: ast.AST) -> Optional[str]:
+    if not is_pure_expression(node):
+        return None
+    if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Compare)):
+        return ast.dump(node, annotate_fields=False, include_attributes=False)
+    return None
+
+
+def expr_depends_on_name(key: str, modified: Set[str]) -> bool:
+    return any(name in key for name in modified)

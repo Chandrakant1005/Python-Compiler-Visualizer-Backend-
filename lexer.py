@@ -1,45 +1,92 @@
-import tokenize
-import io
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
+from parser import ManualTokenizer, ParseError
+
+
+TOKEN_TYPE_MAP = {
+    "IDENTIFIER": "identifier",
+    "NUMBER": "const",
+    "STRING": "const",
+    "KEYWORD": "keyword",
+    "OPERATOR": "op",
+    "SEPARATOR": "sep",
+    "NEWLINE": "newline",
+    "INDENT": "indent",
+    "DEDENT": "dedent",
+    "EOF": "eof",
+}
+
 
 class Lexer:
-    def __init__(self):
-        self.tokens = []
-    
+    def __init__(self) -> None:
+        self.tokens: List[Dict[str, Any]] = []
+
     def tokenize(self, code: str) -> List[Dict[str, Any]]:
-        """Tokenize Python code and return token information"""
         self.tokens = []
-        
+        tokenizer = ManualTokenizer()
+
         try:
-            # Convert string to BytesIO for tokenize
-            code_bytes = io.BytesIO(code.encode('utf-8'))
-            
-            # Get tokens
-            for token in tokenize.tokenize(code_bytes.readline):
-                if token.type != tokenize.ENCODING:  # Skip encoding token
-                    token_info = {
-                        'type': tokenize.tok_name.get(token.type, 'UNKNOWN'),
-                        'value': token.string,
-                        'line': token.start[0],
-                        'column': token.start[1],
-                        'end_line': token.end[0],
-                        'end_column': token.end[1]
+            raw_tokens = tokenizer.tokenize(code)
+            for token in raw_tokens:
+                self.tokens.append(
+                    {
+                        "type": TOKEN_TYPE_MAP.get(token.kind, token.kind.lower()),
+                        "value": token.value,
+                        "line": token.line,
+                        "column": token.column,
+                        "end_line": token.line,
+                        "end_column": token.column + max(len(token.value), 1) - 1,
+                        "grammar_role": self._describe_role(token.kind, token.value),
                     }
-                    self.tokens.append(token_info)
-            
+                )
             return self.tokens
-            
-        except (tokenize.TokenError, IndentationError, SyntaxError) as e:
-            return [{'error': f'Tokenization error: {str(e)}'}]
-    
+        except ParseError as exc:
+            partial_tokens = exc.partial_tokens or tokenizer.partial_tokens
+            for token in partial_tokens:
+                self.tokens.append(
+                    {
+                        "type": TOKEN_TYPE_MAP.get(token.kind, token.kind.lower()),
+                        "value": token.value,
+                        "line": token.line,
+                        "column": token.column,
+                        "end_line": token.line,
+                        "end_column": token.column + max(len(token.value), 1) - 1,
+                        "grammar_role": self._describe_role(token.kind, token.value),
+                    }
+                )
+            self.tokens.append(
+                {
+                    "error": f"Tokenization error: {str(exc)}",
+                    "error_type": "LexicalError",
+                    "description": "Lexical analysis stopped because the source contains a character or token outside the supported grammar.",
+                    "line": exc.line,
+                    "column": exc.column,
+                }
+            )
+            return self.tokens
+
     def get_tokens_by_type(self, token_type: str) -> List[Dict[str, Any]]:
-        """Get all tokens of a specific type"""
-        return [token for token in self.tokens if token['type'] == token_type]
-    
+        return [token for token in self.tokens if token.get("type") == token_type]
+
     def get_identifiers(self) -> List[str]:
-        """Get all identifier tokens"""
-        identifiers = []
-        for token in self.tokens:
-            if token['type'] == 'NAME':
-                identifiers.append(token['value'])
-        return list(set(identifiers))  # Remove duplicates
+        identifiers = [token["value"] for token in self.tokens if token.get("type") == "identifier"]
+        return sorted(set(identifiers))
+
+    def _describe_role(self, kind: str, value: str) -> str:
+        if kind == "KEYWORD":
+            return "grammar keyword"
+        if kind == "IDENTIFIER":
+            return "identifier"
+        if kind in {"NUMBER", "STRING"}:
+            return "constant"
+        if kind == "OPERATOR":
+            return "operator"
+        if kind == "SEPARATOR":
+            return "separator"
+        if kind == "NEWLINE":
+            return "line break"
+        if kind in {"INDENT", "DEDENT"}:
+            return "block marker"
+        if kind == "EOF":
+            return "end of file"
+        return value

@@ -1,282 +1,286 @@
 import ast
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 
 class IRGenerator:
-    def __init__(self):
-        self.instructions = []
+    def __init__(self) -> None:
+        self.instructions: List[Dict[str, Any]] = []
         self.temp_counter = 0
         self.label_counter = 0
-    
+
     def generate(self, code: str) -> List[Dict[str, Any]]:
-        """Generate Three Address Code from Python code"""
+        """Generate numbered three-address code."""
         try:
             tree = ast.parse(code)
             self.instructions = []
             self.temp_counter = 0
             self.label_counter = 0
-            
+
             for node in tree.body:
-                self._generate_node(node)
-            
+                self._emit_statement(node)
+
+            self._emit("EOF", kind="end")
+            self._resolve_labels()
             return self.instructions
-        except SyntaxError as e:
-            return [{'error': f'Syntax error: {str(e)}', 'line': e.lineno}]
-    
-    def _new_temp(self) -> str:
-        """Generate a new temporary variable"""
-        self.temp_counter += 1
-        return f"t{self.temp_counter}"
-    
-    def _new_label(self) -> str:
-        """Generate a new label"""
-        self.label_counter += 1
-        return f"L{self.label_counter}"
-    
-    def _generate_node(self, node: ast.AST) -> str:
-        """Generate IR for an AST node and return the result variable"""
+        except SyntaxError as exc:
+            return [
+                {
+                    "error": f"Syntax error: {str(exc)}",
+                    "error_type": "IRError",
+                    "line": exc.lineno,
+                    "column": exc.offset,
+                }
+            ]
+
+    def _emit_statement(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Assign):
-            result = self._generate_node(node.value)
-            
+            value = self._emit_expression(node.value)
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    self._add_instruction('assign', result, target.id)
-                elif isinstance(target, ast.Tuple):
-                    # Handle tuple unpacking (simplified)
-                    for i, elt in enumerate(target.elts):
-                        if isinstance(elt, ast.Name):
-                            self._add_instruction('assign', f"{result}[{i}]", elt.id)
-            
-            return result
-        
-        elif isinstance(node, ast.AugAssign):
-            # Handle augmented assignments (x += 1)
-            result = self._generate_node(node.value)
-            temp = self._new_temp()
-            self._add_instruction('binary', node.target.id, result, temp, '+=')
-            self._add_instruction('assign', temp, node.target.id)
-            return node.target.id
-        
-        elif isinstance(node, ast.BinOp):
-            left = self._generate_node(node.left)
-            right = self._generate_node(node.right)
-            temp = self._new_temp()
-            
-            op = self._get_operator(node.op)
-            self._add_instruction('binary', left, right, temp, op)
-            return temp
-        
-        elif isinstance(node, ast.UnaryOp):
-            operand = self._generate_node(node.operand)
-            temp = self._new_temp()
-            
-            op = self._get_unary_operator(node.op)
-            self._add_instruction('unary', operand, temp, op)
-            return temp
-        
-        elif isinstance(node, ast.Compare):
-            left = self._generate_node(node.left)
-            result = self._new_temp()
-            
-            if len(node.ops) == 1 and len(node.comparators) == 1:
-                right = self._generate_node(node.comparators[0])
-                op = self._get_comparison_operator(node.ops[0])
-                self._add_instruction('compare', left, right, result, op)
+                    self._emit(f"{target.id} = {value}", kind="assign")
+            return
+
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            right = self._emit_expression(node.value)
+            op = self._binary_symbol(node.op)
+            self._emit(f"{node.target.id} = {node.target.id} {op} {right}", kind="assign")
+            return
+
+        if isinstance(node, ast.Expr):
+            if isinstance(node.value, ast.Call):
+                self._emit_call(node.value, discard_result=True)
             else:
-                # Handle chained comparisons (simplified)
-                for i, (op, comparator) in enumerate(zip(node.ops, node.comparators)):
-                    right = self._generate_node(comparator)
-                    temp_result = self._new_temp()
-                    comp_op = self._get_comparison_operator(op)
-                    self._add_instruction('compare', left, right, temp_result, comp_op)
-                    
-                    if i == 0:
-                        self._add_instruction('assign', temp_result, result)
-                        left = temp_result
-                    else:
-                        temp_and = self._new_temp()
-                        self._add_instruction('binary', result, temp_result, temp_and, 'and')
-                        self._add_instruction('assign', temp_and, result)
-                        left = temp_result
-            
-            return result
-        
-        elif isinstance(node, ast.Name):
+                self._emit_expression(node.value)
+            return
+
+        if isinstance(node, ast.If):
+            self._emit_if(node)
+            return
+
+        if isinstance(node, ast.While):
+            self._emit_while(node)
+            return
+
+        if isinstance(node, ast.For):
+            self._emit_for(node)
+            return
+
+        if isinstance(node, ast.FunctionDef):
+            self._emit_function(node)
+            return
+
+        if isinstance(node, ast.Return):
+            value = self._emit_expression(node.value) if node.value else "None"
+            self._emit(f"return {value}", kind="return")
+            return
+
+        if isinstance(node, ast.Global):
+            return
+
+    def _emit_if(self, node: ast.If) -> None:
+        then_label = self._new_label()
+        end_label = self._new_label()
+        test_text = self._emit_condition_text(node.test)
+
+        self._emit(f"if {test_text} goto {then_label}", kind="branch_true", branch_label=then_label, branch_mode="true")
+
+        if node.orelse:
+            for statement in node.orelse:
+                self._emit_statement(statement)
+            self._emit(f"goto {end_label}", kind="goto", branch_label=end_label)
+        else:
+            self._emit(f"goto {end_label}", kind="goto", branch_label=end_label)
+
+        self._mark_label(then_label)
+
+        for statement in node.body:
+            self._emit_statement(statement)
+
+        self._mark_label(end_label)
+
+    def _emit_while(self, node: ast.While) -> None:
+        start_label = self._new_label()
+        exit_label = self._new_label()
+        self._mark_label(start_label)
+        test_text = self._emit_condition_text(node.test)
+        self._emit(f"ifFalse {test_text} goto {exit_label}", kind="branch_false", branch_label=exit_label, branch_mode="false")
+        for statement in node.body:
+            self._emit_statement(statement)
+        self._emit(f"goto {start_label}", kind="goto", branch_label=start_label)
+        self._mark_label(exit_label)
+
+    def _emit_for(self, node: ast.For) -> None:
+        if not isinstance(node.target, ast.Name):
+            return
+
+        iterable = self._emit_expression(node.iter)
+        start_label = self._new_label()
+        exit_label = self._new_label()
+        self._emit(f"{node.target.id} = 0", kind="assign")
+        self._mark_label(start_label)
+        self._emit(
+            f"if {node.target.id} >= {iterable} goto {exit_label}",
+            kind="branch_true",
+            branch_label=exit_label,
+            branch_mode="true",
+        )
+        for statement in node.body:
+            self._emit_statement(statement)
+        temp = self._new_temp()
+        self._emit(f"{temp} = {node.target.id} + 1", kind="temp")
+        self._emit(f"{node.target.id} = {temp}", kind="assign")
+        self._emit(f"goto {start_label}", kind="goto", branch_label=start_label)
+        self._mark_label(exit_label)
+
+    def _emit_function(self, node: ast.FunctionDef) -> None:
+        self._emit(f"func {node.name} begin", kind="function")
+        for arg in node.args.args:
+            self._emit(f"arg {arg.arg}", kind="argument")
+        for statement in node.body:
+            self._emit_statement(statement)
+        self._emit(f"func {node.name} end", kind="function")
+
+    def _emit_expression(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
             return node.id
-        
-        elif isinstance(node, ast.Constant):
-            return repr(node.value)
-        
-        elif isinstance(node, ast.Num):  # For older Python versions
-            return str(node.n)
-        
-        elif isinstance(node, ast.Str):  # For older Python versions
-            return repr(node.s)
-        
-        elif isinstance(node, ast.Call):
-            # Handle function calls
-            args = []
-            for arg in node.args:
-                args.append(self._generate_node(arg))
-            
+
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                return repr(node.value)
+            return str(node.value)
+
+        if isinstance(node, ast.UnaryOp):
+            operand = self._emit_expression(node.operand)
+            if isinstance(node.op, ast.USub):
+                temp = self._new_temp()
+                self._emit(f"{temp} = -{operand}", kind="temp")
+                return temp
+            if isinstance(node.op, ast.Not):
+                temp = self._new_temp()
+                self._emit(f"{temp} = not {operand}", kind="temp")
+                return temp
+
+        if isinstance(node, ast.BinOp):
+            left = self._emit_expression(node.left)
+            right = self._emit_expression(node.right)
             temp = self._new_temp()
-            self._add_instruction('call', node.func.id if isinstance(node.func, ast.Name) else 'func', args, temp)
+            self._emit(f"{temp} = {left} {self._binary_symbol(node.op)} {right}", kind="temp")
             return temp
-        
-        elif isinstance(node, ast.If):
-            # Handle if statements
-            condition = self._generate_node(node.test)
-            else_label = self._new_label()
-            end_label = self._new_label()
-            
-            self._add_instruction('if_false', condition, else_label)
-            
-            # Generate then block
-            for stmt in node.body:
-                self._generate_node(stmt)
-            
-            if node.orelse:
-                self._add_instruction('goto', end_label)
-            
-            self._add_instruction('label', else_label)
-            
-            # Generate else block
-            for stmt in node.orelse:
-                self._generate_node(stmt)
-            
-            if node.orelse:
-                self._add_instruction('label', end_label)
-        
-        elif isinstance(node, ast.For):
-            # Handle for loops
-            iter_var = self._generate_node(node.iter)
-            start_label = self._new_label()
-            end_label = self._new_label()
-            
-            # Initialize loop variable
-            if isinstance(node.target, ast.Name):
-                self._add_instruction('assign', '0', node.target.id)
-            
-            self._add_instruction('label', start_label)
-            
-            # Check condition (simplified)
+
+        if isinstance(node, ast.Compare):
+            left = self._emit_expression(node.left)
+            right = self._emit_expression(node.comparators[0])
             temp = self._new_temp()
-            self._add_instruction('compare', node.target.id, f'len({iter_var})', temp, '<')
-            self._add_instruction('if_false', temp, end_label)
-            
-            # Generate loop body
-            for stmt in node.body:
-                self._generate_node(stmt)
-            
-            # Increment loop variable
-            if isinstance(node.target, ast.Name):
-                temp_inc = self._new_temp()
-                self._add_instruction('binary', node.target.id, '1', temp_inc, '+')
-                self._add_instruction('assign', temp_inc, node.target.id)
-            
-            self._add_instruction('goto', start_label)
-            self._add_instruction('label', end_label)
-        
-        elif isinstance(node, ast.While):
-            # Handle while loops
-            start_label = self._new_label()
-            end_label = self._new_label()
-            
-            self._add_instruction('label', start_label)
-            condition = self._generate_node(node.test)
-            self._add_instruction('if_false', condition, end_label)
-            
-            # Generate loop body
-            for stmt in node.body:
-                self._generate_node(stmt)
-            
-            self._add_instruction('goto', start_label)
-            self._add_instruction('label', end_label)
-        
-        elif isinstance(node, ast.Return):
-            if node.value:
-                result = self._generate_node(node.value)
-                self._add_instruction('return', result)
-            else:
-                self._add_instruction('return', 'None')
-        
-        elif isinstance(node, ast.Expr):
-            # Handle expression statements
-            self._generate_node(node.value)
-        
-        return ""
-    
-    def _get_operator(self, op: ast.operator) -> str:
-        """Get string representation of binary operator"""
-        if isinstance(op, ast.Add):
-            return '+'
-        elif isinstance(op, ast.Sub):
-            return '-'
-        elif isinstance(op, ast.Mult):
-            return '*'
-        elif isinstance(op, ast.Div):
-            return '/'
-        elif isinstance(op, ast.Mod):
-            return '%'
-        elif isinstance(op, ast.Pow):
-            return '**'
-        elif isinstance(op, ast.LShift):
-            return '<<'
-        elif isinstance(op, ast.RShift):
-            return '>>'
-        elif isinstance(op, ast.BitOr):
-            return '|'
-        elif isinstance(op, ast.BitXor):
-            return '^'
-        elif isinstance(op, ast.BitAnd):
-            return '&'
-        elif isinstance(op, ast.FloorDiv):
-            return '//'
-        else:
-            return '?'
-    
-    def _get_unary_operator(self, op: ast.unaryop) -> str:
-        """Get string representation of unary operator"""
-        if isinstance(op, ast.UAdd):
-            return '+'
-        elif isinstance(op, ast.USub):
-            return '-'
-        elif isinstance(op, ast.Not):
-            return 'not'
-        elif isinstance(op, ast.Invert):
-            return '~'
-        else:
-            return '?'
-    
-    def _get_comparison_operator(self, op: ast.cmpop) -> str:
-        """Get string representation of comparison operator"""
-        if isinstance(op, ast.Eq):
-            return '=='
-        elif isinstance(op, ast.NotEq):
-            return '!='
-        elif isinstance(op, ast.Lt):
-            return '<'
-        elif isinstance(op, ast.LtE):
-            return '<='
-        elif isinstance(op, ast.Gt):
-            return '>'
-        elif isinstance(op, ast.GtE):
-            return '>='
-        elif isinstance(op, ast.Is):
-            return 'is'
-        elif isinstance(op, ast.IsNot):
-            return 'is not'
-        elif isinstance(op, ast.In):
-            return 'in'
-        elif isinstance(op, ast.NotIn):
-            return 'not in'
-        else:
-            return '?'
-    
-    def _add_instruction(self, instr_type: str, *args):
-        """Add an instruction to the IR list"""
-        instruction = {
-            'type': instr_type,
-            'args': list(args),
-            'line': len(self.instructions) + 1
+            self._emit(f"{temp} = {left} {self._compare_symbol(node.ops[0])} {right}", kind="temp")
+            return temp
+
+        if isinstance(node, ast.Call):
+            return self._emit_call(node)
+
+        return "?"
+
+    def _emit_call(self, node: ast.Call, discard_result: bool = False) -> str:
+        func_name = node.func.id if isinstance(node.func, ast.Name) else "func"
+        rendered_args = [self._emit_expression(arg) for arg in node.args]
+        if func_name == "print":
+            for arg in rendered_args:
+                self._emit(f"print {arg}", kind="print")
+            return "None"
+
+        for arg in rendered_args:
+            self._emit(f"param {arg}", kind="param")
+
+        if discard_result:
+            self._emit(f"call {func_name}, {len(rendered_args)}", kind="call")
+            return "None"
+
+        temp = self._new_temp()
+        self._emit(f"{temp} = call {func_name}, {len(rendered_args)}", kind="call")
+        return temp
+
+    def _emit_condition_text(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Compare):
+            left = self._emit_expression(node.left)
+            right = self._emit_expression(node.comparators[0])
+            return f"{left} {self._compare_symbol(node.ops[0])} {right}"
+
+        value = self._emit_expression(node)
+        return f"{value} == False"
+
+    def _emit(self, text: str, kind: str, branch_label: Optional[str] = None, branch_mode: Optional[str] = None) -> None:
+        self.instructions.append(
+            {
+                "line": len(self.instructions) + 1,
+                "text": text,
+                "kind": kind,
+                "branch_label": branch_label,
+                "branch_mode": branch_mode,
+            }
+        )
+
+    def _mark_label(self, label: str) -> None:
+        self.instructions.append(
+            {
+                "line": len(self.instructions) + 1,
+                "text": f"{label}:",
+                "kind": "label",
+                "label": label,
+            }
+        )
+
+    def _resolve_labels(self) -> None:
+        label_map = {item["label"]: item["line"] for item in self.instructions if item.get("label")}
+        filtered: List[Dict[str, Any]] = []
+
+        for instruction in self.instructions:
+            text = instruction["text"]
+            label = instruction.get("branch_label")
+            if label and label in label_map:
+                target_line = label_map[label]
+                text = text.replace(label, str(target_line))
+            if instruction["kind"] == "label":
+                continue
+            filtered.append(
+                {
+                    "line": len(filtered) + 1,
+                    "text": text,
+                    "kind": instruction["kind"],
+                }
+            )
+
+        self.instructions = filtered
+
+    def _new_temp(self) -> str:
+        self.temp_counter += 1
+        return f"t{self.temp_counter}"
+
+    def _new_label(self) -> str:
+        self.label_counter += 1
+        return f"L{self.label_counter}"
+
+    def _binary_symbol(self, operator: ast.operator) -> str:
+        mapping = {
+            ast.Add: "+",
+            ast.Sub: "-",
+            ast.Mult: "*",
+            ast.Div: "/",
+            ast.Mod: "%",
         }
-        self.instructions.append(instruction)
+        for node_type, symbol in mapping.items():
+            if isinstance(operator, node_type):
+                return symbol
+        return "?"
+
+    def _compare_symbol(self, operator: ast.cmpop) -> str:
+        mapping = {
+            ast.Eq: "==",
+            ast.NotEq: "!=",
+            ast.Lt: "<",
+            ast.LtE: "<=",
+            ast.Gt: ">",
+            ast.GtE: ">=",
+        }
+        for node_type, symbol in mapping.items():
+            if isinstance(operator, node_type):
+                return symbol
+        return "?"

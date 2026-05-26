@@ -1,206 +1,112 @@
 import dis
 import types
-import io
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 
 class BytecodeGenerator:
-    def __init__(self):
-        self.bytecode = []
-    
+    def __init__(self) -> None:
+        self.bytecode: List[Dict[str, Any]] = []
+
     def generate(self, code: str) -> List[Dict[str, Any]]:
-        """Generate bytecode from Python code"""
+        """Generate a JSON-safe bytecode listing for the module and nested functions."""
         try:
-            # Compile the code
-            compiled_code = compile(code, '<string>', 'exec')
-            
-            # Disassemble the bytecode
+            compiled_code = compile(code, "<string>", "exec")
             self.bytecode = []
-            self._disassemble(compiled_code)
-            
+            self._disassemble(compiled_code, scope_name="module", depth=0)
             return self.bytecode
-        except SyntaxError as e:
-            return [{
-                'error': f'Syntax error: {str(e)}',
-                'line': e.lineno,
-                'column': e.offset
-            }]
-        except Exception as e:
-            return [{
-                'error': f'Bytecode generation error: {str(e)}'
-            }]
-    
-    def _disassemble(self, code_obj: types.CodeType, offset: int = 0):
-        """Disassemble a code object recursively"""
-        # Get bytecode instructions
+        except SyntaxError as exc:
+            return [
+                {
+                    "error": f"Syntax error: {str(exc)}",
+                    "error_type": "BytecodeError",
+                    "line": exc.lineno,
+                    "column": exc.offset,
+                }
+            ]
+        except Exception as exc:
+            return [
+                {
+                    "error": f"Bytecode generation error: {str(exc)}",
+                    "error_type": "BytecodeError",
+                }
+            ]
+
+    def _disassemble(self, code_obj: types.CodeType, scope_name: str, depth: int) -> None:
         instructions = list(dis.get_instructions(code_obj))
-        
-        for i, instr in enumerate(instructions):
-            instruction_info = {
-                'offset': instr.offset + offset,
-                'opcode': instr.opcode,
-                'opname': instr.opname,
-                'arg': instr.arg,
-                'argval': instr.argval,
-                'argrepr': instr.argrepr,
-                'line': instr.lineno,
-                'starts_line': instr.starts_line,
-                'is_jump_target': instr.is_jump_target,
-                'positions': instr.positions if hasattr(instr, 'positions') else None
-            }
-            
-            self.bytecode.append(instruction_info)
-        
-        # Handle nested code objects (functions, lambdas, etc.)
+        for index, instr in enumerate(instructions, start=1):
+            positions = instr.positions if hasattr(instr, "positions") else None
+            line_number = getattr(instr, "line_number", None)
+            if line_number is None and positions is not None:
+                line_number = getattr(positions, "lineno", None)
+            if line_number is None:
+                line_number = instr.starts_line
+
+            self.bytecode.append(
+                {
+                    "scope": scope_name,
+                    "depth": depth,
+                    "index": index,
+                    "offset": instr.offset,
+                    "opcode": instr.opcode,
+                    "opname": instr.opname,
+                    "arg": instr.arg,
+                    "argval": self._sanitize_value(instr.argval),
+                    "argrepr": instr.argrepr,
+                    "line": line_number,
+                    "starts_line": instr.starts_line,
+                    "is_jump_target": instr.is_jump_target,
+                    "positions": self._serialize_positions(positions),
+                    "category": self._categorize_instruction(instr.opname),
+                }
+            )
+
         for const in code_obj.co_consts:
             if isinstance(const, types.CodeType):
-                self._disassemble(const, offset)
-    
-    def get_bytecode_summary(self, code: str) -> Dict[str, Any]:
-        """Get a summary of bytecode information"""
-        try:
-            compiled_code = compile(code, '<string>', 'exec')
-            
-            summary = {
-                'code_info': {
-                    'argcount': compiled_code.co_argcount,
-                    'nlocals': compiled_code.co_nlocals,
-                    'stacksize': compiled_code.co_stacksize,
-                    'flags': compiled_code.co_flags,
-                    'code_length': len(compiled_code.co_code),
-                    'consts_count': len(compiled_code.co_consts),
-                    'names_count': len(compiled_code.co_names),
-                    'varnames_count': len(compiled_code.co_varnames),
-                    'cellvars_count': len(compiled_code.co_cellvars),
-                    'freevars_count': len(compiled_code.co_freevars),
-                    'filename': compiled_code.co_filename,
-                    'name': compiled_code.co_name,
-                    'firstlineno': compiled_code.co_firstlineno,
-                    'lnotab': compiled_code.co_lnotab if hasattr(compiled_code, 'co_lnotab') else None
-                },
-                'constants': list(compiled_code.co_consts),
-                'names': list(compiled_code.co_names),
-                'varnames': list(compiled_code.co_varnames),
-                'cellvars': list(compiled_code.co_cellvars),
-                'freevars': list(compiled_code.co_freevars)
-            }
-            
-            return summary
-            
-        except SyntaxError as e:
+                nested_scope = f"{scope_name}.{const.co_name}" if scope_name != "module" else const.co_name
+                self._disassemble(const, scope_name=nested_scope, depth=depth + 1)
+
+    def _serialize_positions(self, positions: Any) -> Any:
+        if positions is None:
+            return None
+        return {
+            "lineno": getattr(positions, "lineno", None),
+            "end_lineno": getattr(positions, "end_lineno", None),
+            "col_offset": getattr(positions, "col_offset", None),
+            "end_col_offset": getattr(positions, "end_col_offset", None),
+        }
+
+    def _sanitize_value(self, value: Any) -> Any:
+        if isinstance(value, types.CodeType):
             return {
-                'error': f'Syntax error: {str(e)}',
-                'line': e.lineno
+                "kind": "code_object",
+                "name": value.co_name,
+                "argcount": value.co_argcount,
+                "nlocals": value.co_nlocals,
+                "stacksize": value.co_stacksize,
             }
-    
-    def get_opcode_info(self) -> List[Dict[str, Any]]:
-        """Get information about all opcodes"""
-        opcode_info = []
-        
-        for name in dis.opmap:
-            opcode = dis.opmap[name]
-            info = {
-                'name': name,
-                'opcode': opcode,
-                'description': dis.opname[opcode] if opcode < len(dis.opname) else 'UNKNOWN'
-            }
-            
-            # Add additional information for specific opcodes
-            if hasattr(dis, 'hasconst') and opcode in dis.hasconst:
-                info['type'] = 'const'
-            elif hasattr(dis, 'hasname') and opcode in dis.hasname:
-                info['type'] = 'name'
-            elif hasattr(dis, 'hasjrel') and opcode in dis.hasjrel:
-                info['type'] = 'jump_relative'
-            elif hasattr(dis, 'hasjabs') and opcode in dis.hasjabs:
-                info['type'] = 'jump_absolute'
-            elif hasattr(dis, 'haslocal') and opcode in dis.haslocal:
-                info['type'] = 'local'
-            elif hasattr(dis, 'hascompare') and opcode in dis.hascompare:
-                info['type'] = 'compare'
-            elif hasattr(dis, 'hasfree') and opcode in dis.hasfree:
-                info['type'] = 'free'
-            else:
-                info['type'] = 'other'
-            
-            opcode_info.append(info)
-        
-        return sorted(opcode_info, key=lambda x: x['opcode'])
-    
-    def format_bytecode(self, bytecode_instructions: List[Dict[str, Any]]) -> str:
-        """Format bytecode instructions for display"""
-        output = []
-        
-        for instr in bytecode_instructions:
-            if 'error' in instr:
-                output.append(f"Error: {instr['error']}")
-                continue
-            
-            # Format the instruction
-            line_parts = []
-            
-            # Offset
-            offset_str = f"{instr['offset']:4d}"
-            line_parts.append(offset_str)
-            
-            # Jump target indicator
-            if instr['is_jump_target']:
-                line_parts.append('>>')
-            else:
-                line_parts.append('  ')
-            
-            # Opcode and argument
-            if instr['arg'] is not None:
-                line_parts.append(f"{instr['opname']:20} {instr['arg']:3d}")
-            else:
-                line_parts.append(f"{instr['opname']:23}")
-            
-            # Argument representation
-            if instr['argrepr']:
-                line_parts.append(f"({instr['argrepr']})")
-            
-            # Line number
-            if instr['line'] is not None:
-                line_parts.append(f"#{instr['line']:4d}")
-            
-            output.append(' '.join(line_parts))
-        
-        return '\n'.join(output)
-    
-    def analyze_stack_effect(self, code: str) -> Dict[str, Any]:
-        """Analyze stack effects of bytecode instructions"""
-        try:
-            compiled_code = compile(code, '<string>', 'exec')
-            instructions = list(dis.get_instructions(compiled_code))
-            
-            stack_analysis = []
-            stack_depth = 0
-            max_stack_depth = 0
-            
-            for instr in instructions:
-                # Get stack effect for this instruction
-                try:
-                    effect = dis.stack_effect(instr.opcode, instr.arg)
-                except:
-                    effect = 0
-                
-                stack_depth += effect
-                max_stack_depth = max(max_stack_depth, stack_depth)
-                
-                stack_analysis.append({
-                    'offset': instr.offset,
-                    'opname': instr.opname,
-                    'stack_effect': effect,
-                    'stack_depth_before': stack_depth - effect,
-                    'stack_depth_after': stack_depth
-                })
-            
-            return {
-                'instructions': stack_analysis,
-                'max_stack_depth': max_stack_depth,
-                'final_stack_depth': stack_depth
-            }
-            
-        except Exception as e:
-            return {
-                'error': f'Stack analysis error: {str(e)}'
-            }
+        if isinstance(value, tuple):
+            return [self._sanitize_value(item) for item in value]
+        if isinstance(value, list):
+            return [self._sanitize_value(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._sanitize_value(item) for key, item in value.items()}
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return repr(value)
+
+    def _categorize_instruction(self, opname: str) -> str:
+        if opname.startswith(("LOAD_", "STORE_", "DELETE_")):
+            return "Data Access"
+        if opname.startswith(("POP_JUMP", "JUMP", "FOR_ITER")):
+            return "Control Flow"
+        if opname.startswith(("CALL", "PUSH_NULL", "PRECALL", "RETURN_")):
+            return "Calls / Return"
+        if opname.startswith(("COMPARE_", "IS_OP", "CONTAINS_OP")):
+            return "Comparison"
+        if opname.startswith(("BINARY_", "UNARY_", "INPLACE_")) or opname in {"BINARY_OP"}:
+            return "Arithmetic"
+        if opname.startswith(("MAKE_", "BUILD_", "FORMAT_", "LIST_", "DICT_", "SET_")):
+            return "Object Construction"
+        if opname.startswith(("RESUME", "CACHE", "NOP", "COPY", "SWAP")):
+            return "VM / Stack"
+        return "Other"

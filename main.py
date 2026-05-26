@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from lexer import Lexer
 from parser import Parser
@@ -26,13 +26,44 @@ class CodeRequest(BaseModel):
 
 class AnalysisResponse(BaseModel):
     tokens: list
-    ast: dict
+    parser: dict
     symbols: dict
     ir: list
     optimization: dict
     bytecode: list
     success: bool
-    error: str = None
+    error: Optional[str] = None
+
+
+def has_phase_error(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        return bool(payload.get("error"))
+    if isinstance(payload, list):
+        return any(isinstance(item, dict) and item.get("error") for item in payload)
+    return False
+
+
+def build_analysis_response(
+    *,
+    tokens: list,
+    parser: dict,
+    symbols: Optional[dict] = None,
+    ir: Optional[list] = None,
+    optimization: Optional[dict] = None,
+    bytecode: Optional[list] = None,
+    success: bool = True,
+    error: Optional[str] = None,
+) -> dict:
+    return {
+        "tokens": tokens,
+        "parser": parser,
+        "symbols": symbols or {},
+        "ir": ir or [],
+        "optimization": optimization or {},
+        "bytecode": bytecode or [],
+        "success": success,
+        "error": error,
+    }
 
 @app.get("/")
 async def root():
@@ -42,7 +73,7 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post("/analyze")
 async def analyze_code(request: CodeRequest):
     """Analyze Python code through all compiler phases"""
     
@@ -60,30 +91,67 @@ async def analyze_code(request: CodeRequest):
         
         # Phase 1: Lexical Analysis
         tokens = lexer.tokenize(request.code)
+
+        if has_phase_error(tokens):
+            parser_result = parser.parse(request.code)
+            return build_analysis_response(
+                tokens=tokens,
+                parser=parser_result,
+            )
         
-        # Phase 2: Syntax Analysis (AST)
-        ast_result = parser.parse(request.code)
-        
+        # Phase 2: Parser Analysis (recursive descent using the PDF grammar subset)
+        parser_result = parser.parse(request.code)
+
         # Phase 3: Semantic Analysis
         semantic_result = semantic_analyzer.analyze(request.code)
+
+        if has_phase_error(semantic_result):
+            return build_analysis_response(
+                tokens=tokens,
+                parser=parser_result,
+                symbols=semantic_result,
+            )
+
+        if parser_result.get("error"):
+            return build_analysis_response(
+                tokens=tokens,
+                parser=parser_result,
+                symbols=semantic_result,
+            )
         
         # Phase 4: Intermediate Representation (Three Address Code)
         ir_result = ir_generator.generate(request.code)
+
+        if has_phase_error(ir_result):
+            return build_analysis_response(
+                tokens=tokens,
+                parser=parser_result,
+                symbols=semantic_result,
+                ir=ir_result,
+            )
         
         # Phase 5: Optimization
         optimization_result = optimizer.optimize(request.code)
+
+        if has_phase_error(optimization_result):
+            return build_analysis_response(
+                tokens=tokens,
+                parser=parser_result,
+                symbols=semantic_result,
+                ir=ir_result,
+                optimization=optimization_result,
+            )
         
         # Phase 6: Code Generation (Bytecode)
         bytecode_result = bytecode_generator.generate(request.code)
         
-        return AnalysisResponse(
+        return build_analysis_response(
             tokens=tokens,
-            ast=ast_result,
+            parser=parser_result,
             symbols=semantic_result,
             ir=ir_result,
             optimization=optimization_result,
             bytecode=bytecode_result,
-            success=True
         )
         
     except Exception as e:
@@ -101,17 +169,17 @@ async def tokenize_only(request: CodeRequest):
 
 @app.post("/parse")
 async def parse_only(request: CodeRequest):
-    """Perform only syntax analysis"""
+    """Perform only parser analysis"""
     try:
         parser = Parser()
-        ast_result = parser.parse(request.code)
-        return {"ast": ast_result, "success": True}
+        parser_result = parser.parse(request.code)
+        return {"parser": parser_result, "success": True}
     except Exception as e:
-        return {"ast": {}, "success": False, "error": str(e)}
+        return {"parser": {}, "success": False, "error": str(e)}
 
 @app.post("/semantic")
 async def semantic_only(request: CodeRequest):
-    """Perform only semantic analysis"""
+    """Build only the symbol table"""
     try:
         semantic_analyzer = SemanticAnalyzer()
         semantic_result = semantic_analyzer.analyze(request.code)
@@ -159,23 +227,23 @@ async def get_examples():
         },
         "function": {
             "name": "Function Definition",
-            "code": "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n\nresult = fibonacci(10)"
+            "code": "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n\nresult = fibonacci(10)\nprint(result)"
         },
         "loop": {
             "name": "For Loop",
-            "code": "numbers = [1, 2, 3, 4, 5]\ntotal = 0\nfor num in numbers:\n    total += num\nprint(total)"
-        },
-        "class": {
-            "name": "Class Definition",
-            "code": "class Calculator:\n    def __init__(self):\n        self.result = 0\n    \n    def add(self, x):\n        self.result += x\n        return self.result\n    \ncalc = Calculator()\ncalc.add(5)\ncalc.add(3)"
+            "code": "limit = 5\ntotal = 0\nfor num in limit:\n    total = total + num\nprint(total)"
         },
         "conditional": {
             "name": "Conditional Statement",
-            "code": "age = 18\nif age >= 18:\n    status = \"adult\"\nelse:\n    status = \"minor\"\nprint(status)"
+            "code": "age = 18\nif age >= 18:\n    result = age + 1\nelse:\n    result = age - 1\nprint(result)"
         },
-        "complex": {
-            "name": "Complex Example",
-            "code": "def process_data(data):\n    result = []\n    for item in data:\n        if item > 0:\n            result.append(item * 2)\n        else:\n            result.append(0)\n    return result\n\nnumbers = [-1, 2, -3, 4, 5]\nprocessed = process_data(numbers)\nprint(processed)"
+        "while_loop": {
+            "name": "While Loop",
+            "code": "n = 3\nwhile n > 0:\n    n = n - 1\nprint(n)"
+        },
+        "nested": {
+            "name": "Nested Control Flow",
+            "code": "def adjust(n):\n    if n > 10:\n        return n - 1\n    else:\n        return n + 1\n\nvalue = adjust(10)\nprint(value)"
         }
     }
     return examples
